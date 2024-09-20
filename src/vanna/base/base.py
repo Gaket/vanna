@@ -739,82 +739,104 @@ class VannaBase(ABC):
     # ----------------- Connect to Any Database to run the Generated SQL ----------------- #
 
     def connect_to_snowflake(
-        self,
-        account: str,
-        username: str,
-        password: str,
-        database: str,
-        role: Union[str, None] = None,
-        warehouse: Union[str, None] = None,
-        **kwargs
+      self,
+      account: str,
+      username: str,
+      password: str,
+      database: str,
+      role: Union[str, None] = None,
+      warehouse: Union[str, None] = None,
+      **kwargs
     ):
+      try:
+        snowflake = __import__("snowflake.connector")
+        ReauthenticationRequest = __import__('snowflake.connector.network',
+                                             globals(), locals(), [
+                                               'ReauthenticationRequest']).ReauthenticationRequest
+      except ImportError:
+        raise DependencyError(
+          "You need to install required dependencies to execute this method, run command:"
+          " \npip install vanna[snowflake]"
+        )
+
+      username = os.getenv("SNOWFLAKE_USERNAME", username)
+      password = os.getenv("SNOWFLAKE_PASSWORD", password)
+      account = os.getenv("SNOWFLAKE_ACCOUNT", account)
+      database = os.getenv("SNOWFLAKE_DATABASE", database)
+
+      # Validate credentials exist in the environment variables
+      default_values = {"my-username", "mypassword", "my-account",
+                        "my-database"}
+      credentials = {
+        'username': username,
+        'password': password,
+        'account': account,
+        'database': database
+      }
+      for key, value in credentials.items():
+        if value in default_values:
+          raise ImproperlyConfigured(f"Please set your Snowflake {key}.")
+
+      # Store connection parameters for reuse in case of reconnection
+      self.conn = snowflake.connector.connect(
+        user=username,
+        password=password,
+        account=account,
+        database=database,
+        client_session_keep_alive=True,
+        **kwargs
+      )
+
+      def run_sql_snowflake(sql: str) -> pd.DataFrame:
         try:
-            snowflake = __import__("snowflake.connector")
-        except ImportError:
-            raise DependencyError(
-                "You need to install required dependencies to execute this method, run command:"
-                " \npip install vanna[snowflake]"
-            )
+          cs = self.conn.cursor()
 
-        if username == "my-username":
-            username_env = os.getenv("SNOWFLAKE_USERNAME")
+          if role is not None:
+            cs.execute(f"USE ROLE {role}")
 
-            if username_env is not None:
-                username = username_env
-            else:
-                raise ImproperlyConfigured("Please set your Snowflake username.")
+          if warehouse is not None:
+            cs.execute(f"USE WAREHOUSE {warehouse}")
+          cs.execute(f"USE DATABASE {database}")
 
-        if password == "mypassword":
-            password_env = os.getenv("SNOWFLAKE_PASSWORD")
+          cur = cs.execute(sql)
 
-            if password_env is not None:
-                password = password_env
-            else:
-                raise ImproperlyConfigured("Please set your Snowflake password.")
+          results = cur.fetchall()
 
-        if account == "my-account":
-            account_env = os.getenv("SNOWFLAKE_ACCOUNT")
+          # Create a pandas dataframe from the results
+          df = pd.DataFrame(results,
+                            columns=[desc[0] for desc in cur.description])
 
-            if account_env is not None:
-                account = account_env
-            else:
-                raise ImproperlyConfigured("Please set your Snowflake account.")
-
-        if database == "my-database":
-            database_env = os.getenv("SNOWFLAKE_DATABASE")
-
-            if database_env is not None:
-                database = database_env
-            else:
-                raise ImproperlyConfigured("Please set your Snowflake database.")
-
-        conn = snowflake.connector.connect(
+          return df
+        except ReauthenticationRequest as e:
+          self.log(title="Snowflake Connector",
+                   message="Authentication token has expired. Re-authenticating.")
+          self.conn = snowflake.connector.connect(
             user=username,
             password=password,
             account=account,
             database=database,
             client_session_keep_alive=True,
             **kwargs
-        )
+          )
+          # Retry the query manually again not to get into infinite recursion in case of repeated failures
+          cs = self.conn.cursor()
 
-        def run_sql_snowflake(sql: str) -> pd.DataFrame:
-            cs = conn.cursor()
+          if role is not None:
+            cs.execute(f"USE ROLE {role}")
 
-            if role is not None:
-                cs.execute(f"USE ROLE {role}")
+          if warehouse is not None:
+            cs.execute(f"USE WAREHOUSE {warehouse}")
+          cs.execute(f"USE DATABASE {database}")
 
-            if warehouse is not None:
-                cs.execute(f"USE WAREHOUSE {warehouse}")
-            cs.execute(f"USE DATABASE {database}")
+          self.log(title="Re-executing SQL", message=sql)
+          cs.execute(sql)
+          results = cs.fetchall()
 
-            cur = cs.execute(sql)
+          # Create a pandas dataframe from the results
+          df = pd.DataFrame(results,
+                            columns=[desc[0] for desc in cs.description])
+          return df
 
-            results = cur.fetchall()
-
-            # Create a pandas dataframe from the results
-            df = pd.DataFrame(results, columns=[desc[0] for desc in cur.description])
-
-            return df
 
         self.dialect = "Snowflake SQL"
         self.run_sql = run_sql_snowflake
