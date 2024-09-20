@@ -838,9 +838,9 @@ class VannaBase(ABC):
           return df
 
 
-        self.dialect = "Snowflake SQL"
-        self.run_sql = run_sql_snowflake
-        self.run_sql_is_set = True
+      self.dialect = "Snowflake SQL"
+      self.run_sql = run_sql_snowflake
+      self.run_sql_is_set = True
 
     def connect_to_sqlite(self, url: str, check_same_thread: bool = False,  **kwargs):
         """
